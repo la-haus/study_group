@@ -1,11 +1,9 @@
-"""Periodically capture images from camera
-
-Prerequisites:
-  - sudo apt-get install libgtk2.0-dev
-  - conda install -c conda-forge opencv=4.1.0
-  - pip install opencv-contrib-python  : Needed to get cv2.data submodule
+"""Periodically capture images from camera, detect a face, check if the face has moved down
+from it's original possition. Play an alert soundif it has...
 """
+
 import os
+import sys
 import cv2
 import time
 import datetime as dt
@@ -20,23 +18,22 @@ Image = np.ndarray  # A CV2-images is really just an array
 
 CAMERA_IDX = 2  # Necessary when there is more than one webcam in the system, otherwise just use 0
 SLOUCH_THRESHOLD = 0.15
-ALERT_SOUND_FILE = os.getenv('HOME') + '/suspend-error.oga'
+ALERT_SOUND_FILE = './complete.oga'
 FACE_DETECT_MODEL_SPEC = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
 
-DATA_PATH = Path(os.getenv('HOME')) / '_data/bad-posture-detect'
-DATA_PATH.mkdir(parents=True, exist_ok=True)
 
-STORE_IMGS = False
+STORE_IMGS = False  # Switch to override CLI option
 # %%
 
 
 def main():
     """run the main loop"""
-    # %%
     pygame.mixer.init()
     cam = VideoCapture( CAMERA_IDX )  # get camera handle
 
-    detector = SlouchDetector( SLOUCH_THRESHOLD, do_store_imgs=STORE_IMGS )
+    store_imgs = ('--store-imgs' in sys.argv) or STORE_IMGS
+
+    detector = SlouchDetector( SLOUCH_THRESHOLD, do_store_imgs=store_imgs )
 
     try:
         while True:
@@ -68,6 +65,12 @@ class SlouchDetector:
         self.face_cascade = cv2.CascadeClassifier(FACE_DETECT_MODEL_SPEC)
         self.do_store_imgs = do_store_imgs
 
+        if self.do_store_imgs:
+            self.data_path = Path(os.getenv('HOME')) / '_data/bad-posture-detect'
+            self.data_path.mkdir( parents=True, exist_ok=True )
+
+            print(f'storing images under: {self.data_path}')
+
     def detect(self, gray: Image):
         """Detect the main face in the image and whether it is slouching
         as compared to first detection"""
@@ -98,12 +101,12 @@ class SlouchDetector:
         else:
             print(now, 'no faces detected')
 
-    def _draw_face_frame(self, face, gray: Image, is_slouching: bool):
+    def _draw_face_frame(self, face, gray: Image, is_slouching_: bool):
         """Draw rectangles around the faces"""
         x, y, w, h = face
 
         rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        if is_slouching:
+        if is_slouching_:
             color = (0, 0, 255)
         else:
             color = (0, 255, 0)
@@ -114,22 +117,22 @@ class SlouchDetector:
         face_y = int(y + h / 2)
         cv2.line(rgb, (line_x, 0), (line_x, face_y), color, 2)
         cv2.line(rgb, (line_x - 5, face_y), (line_x + 5, face_y), color, 2)
-        cv2.putText(rgb, f"face_y = {face_y:.1f}", (line_x + 15, int((y + h / 2) / 2)),
+        cv2.putText(rgb, f"face_y = {face_y:.0f}", (line_x + 15, int((y + h / 2) / 2)),
                     cv2.FONT_HERSHEY_PLAIN, 1.4, color)
 
         face_height = face[3]
         face_y2 = (face[1] + face_height * 0.5)
         ratio = -(face_y2 - self.reference_y) / face_height
-        is_slouching2 = ratio < -self.thresh
+        is_slouching = ratio < -self.thresh
 
         diff = face_y2 - self.reference_y
-        labels = [ f"face_y = {face_y2:.0f} ref_y:{self.reference_y:.1f} diff:{diff}",
-                   f"f_height={face_height:d} ratio={ratio:.4f} is_slouching2={is_slouching2}"]
+        labels = [ f"face_y = {face_y2:.0f} ref_y:{self.reference_y:.0f} diff:{diff}",
+                   f"f_height={face_height:d} ratio={ratio:.4f} is_slouching={is_slouching}"]
         cv2.putText(rgb, labels[0], (10, gray.shape[0] - 22), cv2.FONT_HERSHEY_PLAIN, 1.4, color)
         cv2.putText(rgb, labels[1], (10, gray.shape[0] - 5 ), cv2.FONT_HERSHEY_PLAIN, 1.4, color)
 
         now_str = dt.datetime.now().strftime("%H-%M-%S")
-        cv2.imwrite(str(DATA_PATH / f'img_{now_str}_{int(is_slouching)}.jpg'), rgb)
+        cv2.imwrite(str(self.data_path / f'img_{now_str}_{int(is_slouching)}.jpg'), rgb)
 
 
 def _interactive_testing():
@@ -146,7 +149,6 @@ def _interactive_testing():
     cam = VideoCapture( CAMERA_IDX )
     # %% GUI sound production
     pygame.mixer.init()
-
     # %%
     img = _capture_img(cam)
     # an (color) image is just a Width x Height x NumChannels 'matrix', really a rank-3 tensor
@@ -163,7 +165,7 @@ def _interactive_testing():
 
     _draw_face_frames( faces, img )
     # %%
-    cv2.imwrite( str(DATA_PATH / "img_and_faces.jpg"), img )
+    cv2.imwrite( f"{os.getenv('HOME')}/_data/bad-posture-detect/img_and_faces.jpg", img )
     # %%
     cam.release()  # close the webcam
     # %%
@@ -189,17 +191,13 @@ def _capture_img( cam: cv2.VideoCapture ):
 def _interactive_show_img( img, window_title='cam-img' ):
     cv2.imshow(window_title, img)
     cv2.waitKey()
-    # %%
+
 
 
 def play_alert_sound():
     """play the sound pointed to by ALERT_SOUND_FILE"""
-    # %%
     sound = pygame.mixer.Sound( ALERT_SOUND_FILE )
     sound.play()
-    # %%
 
-
-# %%
 
 main()
