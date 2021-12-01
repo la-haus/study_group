@@ -2,6 +2,7 @@
 from it's original possition. Play an alert soundif it has...
 """
 
+from typing import Tuple, List
 import os
 import sys
 import cv2
@@ -12,15 +13,18 @@ from pathlib import Path
 import numpy as np
 from cv2 import VideoCapture
 import pygame
+from pygame import Surface
+from pygame import surfarray
 
-# type alias
+# type aliases
 Image = np.ndarray  # A CV2-images is really just an array
+BBox = List[int]
 
 CAMERA_IDX = 2  # Necessary when there is more than one webcam in the system, otherwise just use 0
 SLOUCH_THRESHOLD = 0.15
 ALERT_SOUND_FILE = './complete.oga'
 FACE_DETECT_MODEL_SPEC = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-
+CAM_IMG_WIDTH_HEIGHT = (640, 480)  # used for displaying the camera image in real-time
 
 STORE_IMGS = False  # Switch to override CLI option
 # %%
@@ -28,12 +32,10 @@ STORE_IMGS = False  # Switch to override CLI option
 
 def main():
     """run the main loop"""
-    pygame.mixer.init()
-    cam = VideoCapture( CAMERA_IDX )  # get camera handle
-
+    display, cam = init_interface(camera_idx=CAMERA_IDX)
     store_imgs = ('--store-imgs' in sys.argv) or STORE_IMGS
 
-    detector = SlouchDetector( SLOUCH_THRESHOLD, do_store_imgs=store_imgs )
+    detector = SlouchDetector( SLOUCH_THRESHOLD, do_store_imgs=store_imgs, display=display )
 
     try:
         while True:
@@ -55,14 +57,31 @@ def main():
         raise exc
 
 
+def init_interface( camera_idx: int ) -> Tuple[Surface, VideoCapture]:
+    """Initialize CV2's VideoCapture object as well as pygame's display, sound mixer, etc...
+    return some of these in a tuple"""
+
+    pygame.mixer.init()
+    cam = VideoCapture( camera_idx )  # get camera handle
+    cam.set( cv2.CAP_PROP_BUFFERSIZE, 1 )
+
+    display = pygame.display.set_mode( (640, 480) )
+    print( f'display={type(display)}' )
+    display.fill( (255, 255, 255) )  # fill with white back-ground
+    pygame.display.set_caption( 'Slouch-Detect' )
+
+    return display, cam
+
+
 class SlouchDetector:
     """Object used to detect a face in a grayscale image,  measure its vertical position
     and determine whether there is slouching"""
 
-    def __init__(self, thresh: float, do_store_imgs: bool = False ):
+    def __init__(self, thresh: float, do_store_imgs: bool = False, display=None ):
         self.reference_y = None
         self.thresh = thresh
         self.face_cascade = cv2.CascadeClassifier(FACE_DETECT_MODEL_SPEC)
+        self.display = display
         self.do_store_imgs = do_store_imgs
 
         if self.do_store_imgs:
@@ -74,8 +93,14 @@ class SlouchDetector:
     def detect(self, gray: Image):
         """Detect the main face in the image and whether it is slouching
         as compared to first detection"""
-        now = dt.datetime.now()
+        # now_str only for logging purposes
+        now_str = dt.datetime.now().strftime('%M/%d %H:%M:%S.%f')[:-3]
+
+        # Face detection happens here.
+        # The following returns a (possible empty) array of bounding boxes
         faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+
+        rgb_img = cv2.cvtColor( gray, cv2.COLOR_GRAY2RGB )
 
         if len(faces) > 0:
             face = faces[0]
@@ -84,32 +109,35 @@ class SlouchDetector:
 
             if self.reference_y is None:
                 self.reference_y = face_y
-                print(f'{now} reference_y: {self.reference_y} thresh: {self.thresh}')
+                print(f'{now_str} Set reference_y: {self.reference_y} thresh: {self.thresh}')
 
             ratio = -(face_y - self.reference_y) / face_height
             is_slouching = ratio < -self.thresh
 
             if is_slouching:
-                print(f'{now} y:{face_y} h:{face_height} ratio:{ratio:.4f} you are slouching!!!')
+                conclusion = 'you are slouching'
                 play_alert_sound()
             else:
-                print(f'{now} y:{face_y}, h:{face_height} ratio:{ratio:.4f} you are OK')
+                conclusion = 'you are OK!'
 
-            if self.do_store_imgs:
-                self._draw_face_frame(face, gray, is_slouching)
+            print(f'{now_str} y:{face_y:4.0f} h:{face_height:4.0f} ratio:{ratio:7.4f} {conclusion}')
+
+            rgb_img = self._draw_face_frame( face, rgb_img, is_slouching )
 
         else:
-            print(now, 'no faces detected')
+            print(now_str, 'no faces detected')
 
-    def _draw_face_frame(self, face, gray: Image, is_slouching_: bool):
+        self._refresh_display(rgb_img)
+
+    def _draw_face_frame(self,  face: BBox, rgb: Image, is_slouching_: bool) -> Image:
         """Draw rectangles around the faces"""
+
         x, y, w, h = face
 
-        rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         if is_slouching_:
-            color = (0, 0, 255)
+            color = (255, 0, 0)  # red
         else:
-            color = (0, 255, 0)
+            color = (0, 255, 0)  # green
 
         cv2.rectangle(rgb, (x, y), (x + w, y + h), color, 2)
 
@@ -127,12 +155,24 @@ class SlouchDetector:
 
         diff = face_y2 - self.reference_y
         labels = [ f"face_y = {face_y2:.0f} ref_y:{self.reference_y:.0f} diff:{diff}",
-                   f"f_height={face_height:d} ratio={ratio:.4f} is_slouching={is_slouching}"]
-        cv2.putText(rgb, labels[0], (10, gray.shape[0] - 22), cv2.FONT_HERSHEY_PLAIN, 1.4, color)
-        cv2.putText(rgb, labels[1], (10, gray.shape[0] - 5 ), cv2.FONT_HERSHEY_PLAIN, 1.4, color)
+                   f"f_height={face_height:d} ratio={ratio:.4f} slouching={is_slouching}"]
+        cv2.putText(rgb, labels[0], (10, rgb.shape[0] - 22), cv2.FONT_HERSHEY_PLAIN, 1.4, color)
+        cv2.putText(rgb, labels[1], (10, rgb.shape[0] - 5 ), cv2.FONT_HERSHEY_PLAIN, 1.4, color)
 
-        now_str = dt.datetime.now().strftime("%H-%M-%S")
-        cv2.imwrite(str(self.data_path / f'img_{now_str}_{int(is_slouching)}.jpg'), rgb)
+        if self.do_store_imgs:
+            now_str = dt.datetime.now().strftime("%H-%M-%S")
+            rgb2 = cv2.cvtColor( rgb, cv2.COLOR_RGB2BGR )
+            cv2.imwrite(str(self.data_path / f'img_{now_str}_{int(is_slouching)}.jpg'), rgb2)
+
+        return rgb
+
+    def _refresh_display( self, rgb_img: Image ):
+        if self.display is not None:
+            rgb_img_disp = rgb_img.transpose( (1, 0, 2) )
+            img_surf = surfarray.make_surface( rgb_img_disp )
+            self.display.blit( img_surf, (0, 0) )
+
+            pygame.display.update()
 
 
 def _interactive_testing():
@@ -191,7 +231,6 @@ def _capture_img( cam: cv2.VideoCapture ):
 def _interactive_show_img( img, window_title='cam-img' ):
     cv2.imshow(window_title, img)
     cv2.waitKey()
-
 
 
 def play_alert_sound():
